@@ -11,36 +11,18 @@ class MyApp(ShowBase):
     def __init__(self):
         ShowBase.__init__(self)
 
+        self.terrain = self.loader.loadModel("models/environment")
+        self.terrain.reparentTo(self.render)
+
+        self.terrain.setScale(0.5, 0.5, 0.5)
+        self.terrain.setPos(0, 0, 0)
+
         # loading in and configuring the plane
-        self.planeModel = self.loader.loadModel("assets/models/C172.glb")
+        self.planeModel = self.loader.loadModel("assets/models/cessna-172.gltf")
         self.planeModel.reparentTo(self.render)
 
         self.planeModel.setScale(1.5, 1.5, 1.5)
         self.planeModel.setPos(0, 0, 50)
-
-        # Create simple terrain
-        from panda3d.core import CardMaker
-        cm = CardMaker("ground")
-        cm.setFrame(-1000, 1000, -1000, 1000)
-        self.terrain = self.render.attachNewNode(cm.generate())
-        self.terrain.setPos(0, 0, 0)
-        self.terrain.setScale(0.25, 0.25, 0.25)
-        
-        # Add some reference cubes to see movement
-        for i in range(10):
-            for j in range(10):
-                cube = self.loader.loadModel("models/environment")
-                if not cube:
-                    # Create simple cube if environment model doesn't exist
-                    from panda3d.core import CardMaker
-                    cm_cube = CardMaker("cube")
-                    cm_cube.setFrame(-1, 1, -1, 1)
-                    cube = self.render.attachNewNode(cm_cube.generate())
-                    cube.setColor(0.8, 0.4, 0.2, 1)  # Brown cubes
-                
-                cube.reparentTo(self.render)
-                cube.setPos(i * 50 - 250, j * 50 - 250, 2)
-                cube.setScale(5, 5, 5)
         
         # Set sky color
         self.setBackgroundColor(0.5, 0.8, 1.0, 1)
@@ -78,51 +60,60 @@ class MyApp(ShowBase):
 
         self.taskMgr.add(self.update_physics, "update_physics")
 
+    # semi realistic physics (actually proud of ts)
     def update_physics(self, task):
         dt = globalClock.getDt()
 
         pitch_rad = self.pitch * (pi / 180)
         
-        # Much stronger thrust
-        thrust = self.throttle * 200
+        thrust = self.throttle * -100
         
         speed = self.velocity.length()
         
-        # Better lift calculation - works even at low speeds
-        base_lift = thrust * 0.3  # Basic lift from forward motion
-        pitch_lift = speed * 5 * sin(pitch_rad)  # Additional lift from pitch
+        max_forward_speed = 120
+        max_climb_rate = 16
+
+        base_lift = thrust * 0.3
+        pitch_lift = speed * 5 * sin(pitch_rad)
         total_lift = base_lift + pitch_lift
         
-        # Reduced drag
-        drag = speed * 0.5
-        
-        # Apply forces
+        drag = speed * speed * 0.02 + speed * 1.5
+
         forward_force = thrust - drag
-        vertical_force = total_lift - 1.0  # Much weaker gravity
-        
-        # Update velocity
+        vertical_force = total_lift - 3.0 
+
         self.velocity.y += forward_force * dt
         self.velocity.z += vertical_force * dt
         
-        # Less damping
-        self.velocity *= 0.995
+        if abs(self.velocity.y) > max_forward_speed:
+            self.velocity.y = max_forward_speed if self.velocity.y > 0 else -max_forward_speed
+
+        if self.velocity.z > max_climb_rate:
+            self.velocity.z = max_climb_rate
+        elif self.velocity.z < -max_climb_rate * 1.5:
+            self.velocity.z = -max_climb_rate * 1.5
+
+        self.velocity.y *= 0.98
+        self.velocity.z *= 0.995
+        self.velocity.x *= 0.98
         
-        # Update position
         new_pos = self.planeModel.getPos() + self.velocity * dt
         self.planeModel.setPos(new_pos)
 
         current_hpr = self.planeModel.getHpr()
         self.planeModel.setHpr(current_hpr.x, -self.pitch, current_hpr.z)
         
-        # Update HUD
+        actual_speed = self.velocity.length()
+        climb_rate = self.velocity.z
+
         self.throttle_text.setText(f"Throttle: {self.throttle*100:.0f}%")
-        self.speed_text.setText(f"Speed: {speed:.1f}")
+        self.speed_text.setText(f"Speed: {actual_speed:.1f} | Climb: {climb_rate:.1f}")
         self.altitude_text.setText(f"Alt: {new_pos.z:.1f}")
         self.pitch_text.setText(f"Pitch: {self.pitch:.0f}°")
         self.position_text.setText(f"Pos: {new_pos.x:.0f},{new_pos.y:.0f},{new_pos.z:.0f}")
-        
+
         return task.cont
-    
+    # plane control
     def increase_throttle(self):
         self.throttle = min(1.0, self.throttle + 0.1)
 
@@ -134,6 +125,7 @@ class MyApp(ShowBase):
 
     def pitch_down(self):
         self.pitch = max(-30, self.pitch - 5)
+
 
 app = MyApp()
 app.run()
