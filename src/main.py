@@ -1,9 +1,10 @@
-from math import pi, sin, cos, radians
-
 from direct.showbase.ShowBase import *
 from direct.task import Task
-from panda3d.core import Vec3
+from panda3d.core import Vec3, CollisionNode, CollisionSphere, CollisionTraverser, CollisionHandlerEvent, CollisionBox
 from direct.gui.OnscreenText import OnscreenText
+
+from terrainEngine import update_terrain
+from physicsEngine import update_physics
 
 class MyApp(ShowBase):
     def __init__(self):
@@ -26,95 +27,112 @@ class MyApp(ShowBase):
         self.camera.setPos(0, 30, 10)
         self.camera.lookAt(0, 0, 0)
 
+        # flight physics variables
         self.velocity = Vec3(0, 0, 0)
         self.angular_velocity = Vec3(0, 0, 0)
-        self.throttle = 0.5
+        self.throttle = 0.5  # Start with 50% throttle
         self.pitch = 0.0
         self.roll = 0.0
         self.yaw = 0.0
 
-        self.mass = 1000
-        self.gravity = -3.0  # Reduced gravity for better realism in simulation
-        self.lift_coefficient = 1.5
-        self.drag_coefficient = 0.03
-        self.thrust_power = 3000
-        self.area = 16
+        # terrain var
+        self.loaded_chunks = {}
 
-        self.accept("w", self.increase_throttle)
-        self.accept("s", self.decrease_throttle)
-        self.accept("a", self.turn_left)
-        self.accept("d", self.turn_right)
-        self.accept("arrow_up", self.pitch_up)
-        self.accept("arrow_down", self.pitch_down)
-        self.accept("q", self.roll_left)
-        self.accept("e", self.roll_right)
+        # collision
+        self.cTrav = CollisionTraverser()
+        
+        self.collision_handler = CollisionHandlerEvent()
+        self.collision_handler.addInPattern('%fn-into-%in')
 
-        self.throttle_text = OnscreenText(text="Throttle: 0%", pos=(-1.3, 0.9), scale=0.07)
-        self.speed_text = OnscreenText(text="Speed: 0", pos=(-1.3, 0.8), scale=0.07)
-        self.altitude_text = OnscreenText(text="Alt: 0", pos=(-1.3, 0.7), scale=0.07)
-        self.pitch_text = OnscreenText(text="Pitch: 0", pos=(-1.3, 0.6), scale=0.07)
-        self.position_text = OnscreenText(text="Pos: 0,0,0", pos=(-1.3, 0.5), scale=0.07)
+        # plane collision sphere
+        plane_cnode = CollisionNode('plane')
+        plane_cnode.addSolid(CollisionSphere(0, 0, 0, 5))
 
-        self.taskMgr.add(self.update_physics, "update_physics")
+        self.plane_cnodepath = self.planeModel.attachNewNode(plane_cnode)
+        
+        self.cTrav.addCollider(self.plane_cnodepath, self.collision_handler)
 
-    def update_physics(self, task):
-        dt = globalClock.getDt()
-        pitch_rad = radians(self.pitch)
-        yaw_rad = radians(self.yaw)
+        # terrain collision box
+        terrain_cnode = CollisionNode('terrain')
+        terrain_cnode.addSolid(CollisionBox((0, 0, 0), 500, 500, 10))
+        
+        self.terrain_cnodepath = self.terrain.attachNewNode(terrain_cnode)
 
-        forward = Vec3(sin(yaw_rad), -cos(yaw_rad), 0)
-        upward = Vec3(0, 0, 1)
+        # accept collision
+        self.accept('plane-into-terrain', self.on_plane_collision)
 
-        thrust_force = forward * (self.throttle * self.thrust_power)
+        self.throttle_text = OnscreenText(text="Throttle: 0%", pos=(-1.2, 0.9), scale=0.07)
+        self.speed_text = OnscreenText(text="Speed: 0", pos=(-1.2, 0.8), scale=0.07)
+        self.altitude_text = OnscreenText(text="Alt: 0", pos=(-1.2, 0.7), scale=0.07)
+        self.pitch_text = OnscreenText(text="Pitch: 0", pos=(-1.2, 0.6), scale=0.07)
+        self.position_text = OnscreenText(text="Pos: 0,0,0", pos=(-1.2, 0.5), scale=0.07)
 
-        speed = self.velocity.length()
-        lift_force = upward * (0.5 * 1.225 * speed ** 2 * self.area * self.lift_coefficient)
-
-        drag_force = -self.velocity.normalized() * (0.5 * 1.225 * speed ** 2 * self.area * self.drag_coefficient) if speed > 0 else Vec3(0, 0, 0)
-
-        gravity_force = Vec3(0, 0, self.mass * self.gravity)
-
-        total_force = thrust_force + lift_force + drag_force + gravity_force
-
-        acceleration = total_force / self.mass
-        self.velocity += acceleration * dt
-
-        new_pos = self.planeModel.getPos() + self.velocity * dt
-        self.planeModel.setPos(new_pos)
-
-        self.planeModel.setHpr(self.yaw, -self.pitch, self.roll)
-
-        self.throttle_text.setText(f"Throttle: {self.throttle*100:.0f}%")
-        self.speed_text.setText(f"Speed: {speed:.1f} m/s")
-        self.altitude_text.setText(f"Alt: {new_pos.z:.1f} m")
-        self.pitch_text.setText(f"Pitch: {self.pitch:.0f}°")
-        self.position_text.setText(f"Pos: {new_pos.x:.0f},{new_pos.y:.0f},{new_pos.z:.0f}")
-
+        self.taskMgr.add(self.update_physics_task, "update_physics")
+        self.taskMgr.add(self.check_inputs, "check_inputs")
+        self.taskMgr.add(self.update_terrain_task, "update_terrain")
+        self.taskMgr.add(self.collision_task, "collision")
+    
+    def check_inputs(self, task):
+        if self.mouseWatcherNode.isButtonDown("w"):
+            self.increase_throttle()
+        elif self.mouseWatcherNode.isButtonDown("s"):
+            self.decrease_throttle()
+        elif self.mouseWatcherNode.isButtonDown("a"):
+            self.turn_left()
+        elif self.mouseWatcherNode.isButtonDown("d"):
+            self.turn_right()
+        elif self.mouseWatcherNode.isButtonDown("arrow_up"):
+            self.pitch_up()
+        elif self.mouseWatcherNode.isButtonDown("arrow_down"):
+            self.pitch_down()
+        elif self.mouseWatcherNode.isButtonDown("q"):
+            self.roll_left()
+        elif self.mouseWatcherNode.isButtonDown("e"):
+            self.roll_right()
+        
         return task.cont
 
+    def update_terrain_task(self, task):
+        update_terrain(self.loaded_chunks, self.planeModel, self.loader, self.render)
+        return task.cont
+
+    def update_physics_task(self, task):
+        update_physics(globalClock, self.planeModel, 
+                       self.pitch, self.yaw, self.throttle, self.velocity, self.roll, 
+                       self.throttle_text, self.speed_text, self.altitude_text, self.pitch_text, self.position_text)
+        return task.cont
+
+    def collision_task(self, task):
+        self.cTrav.traverse(self.render)
+        return task.cont
+
+    def on_plane_collision(self, entry):
+        self.planeModel.setPos(0, 50, 0)
+
+    # plane control
     def increase_throttle(self):
-        self.throttle = min(1.0, self.throttle + 0.05)
+        self.throttle = min(1.0, self.throttle + 0.01)
 
     def decrease_throttle(self):
-        self.throttle = max(0.0, self.throttle - 0.05)
+        self.throttle = max(0.0, self.throttle - 0.01)
 
     def pitch_up(self):
-        self.pitch += 2
+        self.pitch += 1
 
     def pitch_down(self):
-        self.pitch -= 2
-
+        self.pitch -= 1
+    
     def roll_right(self):
-        self.roll -= 2
-
+        self.roll -= 1
+    
     def roll_left(self):
-        self.roll += 2
-
+        self.roll += 1
+    
     def turn_left(self):
-        self.yaw -= 2
-
+        self.yaw += 1
+    
     def turn_right(self):
-        self.yaw += 2
+        self.yaw -= 1
 
 app = MyApp()
 app.run()
